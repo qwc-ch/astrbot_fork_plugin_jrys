@@ -79,6 +79,12 @@
         "hint": "设置注意事项在图片上Y轴的位置，默认为1850 例如:(此运势仅供娱乐参考，请勿过度解读。)",
         "default": 1850
     },
+    "show_avatar":{
+        "description": "在海报上绘制用户头像",
+        "type": "bool",
+        "hint": "开启后在海报左下角绘制用户头像；关闭（默认）则不在图上画头像，发送时改为 @ 用户。适用于 QQ 官方机器人/Telegram 等拿不到头像的平台。",
+        "default": false
+    },
     "jrys_keyword_enabled":{
         "description": "启用关键字触发",
         "type": "bool",

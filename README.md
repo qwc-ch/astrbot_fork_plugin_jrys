@@ -34,6 +34,8 @@
 - **Telegram**：通过 Bot API `getUserProfilePhotos` 获取用户头像，用户没设置头像时同样回退默认头像
 - 其他平台：按 QQ 头像直链尝试，失败自动回退默认头像
 
+> 默认配置下海报**不再绘制头像**，发送结果时会先 @ 用户再发图（配置项 `show_avatar` 可重新开启图上头像）。
+
 生成图的风格照着 [https://github.com/shangxueink/koishi-shangxue-apps/tree/main/plugins/jrys-prpr](https://github.com/shangxueink/koishi-shangxue-apps/tree/main/plugins/jrys-prpr)
 这个项目的写的 因为我挺喜欢这个作者的审美的
 

@@ -1,4 +1,5 @@
 from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.message_components import At, Plain, Image
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
 from astrbot.api import AstrBotConfig
@@ -139,14 +140,21 @@ class JrysPlugin(Star):
         background_path = None
         background_should_cleanup = False
 
-        try:
-            results = await asyncio.gather(
-                self.resources.get_avatar_img(user_id, event),
-                self.resources.get_background_image(),
-                return_exceptions=True,  # 捕获异常
-            )
+        # 是否在海报上绘制头像（默认关闭，改为发送时 @ 用户）
+        show_avatar = bool(getattr(self.painter, "show_avatar", False))
 
-            avatar_path, background_result = results
+        try:
+            tasks = [self.resources.get_background_image()]
+            if show_avatar:
+                tasks.insert(0, self.resources.get_avatar_img(user_id, event))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            if show_avatar:
+                avatar_path, background_result = results
+            else:
+                avatar_path = None
+                (background_result,) = results
 
             if isinstance(background_result, Exception):
                 logger.error(f"获取背景图片时出错: {background_result}")
@@ -160,7 +168,7 @@ class JrysPlugin(Star):
 
             background_path, background_should_cleanup = background_result
 
-            if isinstance(avatar_path, Exception):
+            if show_avatar and isinstance(avatar_path, Exception):
                 logger.error(f"获取头像时出错: {avatar_path}")
                 yield event.plain_result("获取头像失败，请稍后再试～")
                 if (
@@ -175,7 +183,7 @@ class JrysPlugin(Star):
                 return
 
             # 平台无法提供头像（如 QQ 官方机器人群聊/C2C）时，使用默认头像兜底
-            if not avatar_path:
+            if show_avatar and not avatar_path:
                 avatar_path = await asyncio.to_thread(
                     self.painter.generate_default_avatar_sync, user_name
                 )
@@ -214,7 +222,13 @@ class JrysPlugin(Star):
                 yield event.plain_result("生成图片失败，请稍后再试～")
                 return
 
-            yield event.image_result(temp_file_path)
+            # 发送时先 @ 用户，再跟上生成的运势图
+            chain = [
+                At(qq=event.get_sender_id(), name=user_name),
+                Plain(f" {user_name} 的今日运势："),
+                Image.fromFileSystem(temp_file_path),
+            ]
+            yield event.chain_result(chain)
             logger.info(f"成功为用户 {user_name}({user_id}) 生成今日运势图片")
 
             # 保存最后一次使用的背景图信息到 jrys_data

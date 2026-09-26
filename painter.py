@@ -87,6 +87,8 @@ class FortunePainter:
         )
         # 是否启用固定运势功能（即每天同一用户的运势相同）
         self.fixed_daily_fortune = self.plugin_config.get("fixed_daily_fortune", True)
+        # 是否在海报上绘制用户头像（默认关闭，改为发送时 @ 用户）
+        self.show_avatar = self.plugin_config.get("show_avatar", False)
 
         self.holidays = self.plugin_config.get(
             "holidays", ["01-01", "02-14", "05-01", "10-01", "12-25"]
@@ -261,7 +263,8 @@ class FortunePainter:
                 font=self.fonts[30],
             )
 
-            image = self.draw_avatar_img(avatar_path, image)
+            if self.show_avatar and avatar_path:
+                image = self.draw_avatar_img(avatar_path, image)
 
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
                 image = image.convert("RGB")
