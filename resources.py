@@ -315,6 +315,7 @@ class ResourceManager:
                 except Exception:
                     platform = ""
             # 不同平台的 user_id 可能撞号，缓存文件名带平台前缀
+            platform = platform.lower().replace("-", "_") if platform else ""
             cache_key = f"{platform}_{user_id}" if platform else str(user_id)
             avatar_path = os.path.join(self.avatar_dir, f"{cache_key}.jpg")
             # 检查头像是否存在
@@ -355,23 +356,25 @@ class ResourceManager:
     ) -> Optional[str]:
         """
         按平台解析用户头像 URL：
-        - aiocqhttp(OneBot v11): QQ 头像直链
-        - qqofficial(QQ 官方机器人): 尝试从频道消息的 author.avatar 获取
+        - OneBot v11 (aiocqhttp 等): QQ 头像直链（仅当 user_id 是纯数字 QQ 号）
+        - QQ 官方机器人 (qqofficial): 尝试从频道消息的 author.avatar 获取
           （群聊/C2C 官方接口不提供头像，返回 None 走默认头像）
         - telegram: 通过 Bot API getUserProfilePhotos 获取
-        - 其他平台: 尝试按 QQ 号直链获取（兼容旧行为）
+        - 其他平台: user_id 是纯数字时按 QQ 号直链获取，否则走默认头像
         """
-        if platform in ("aiocqhttp", "onebot", "onebot11") or not platform:
-            return f"http://q.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        p = (platform or "").lower().replace("-", "_")
 
-        if platform == "qqofficial":
+        if "qqofficial" in p or "qq_official" in p or p in ("qqbot", "qq"):
             return self._resolve_qqofficial_avatar(event)
 
-        if platform == "telegram":
+        if "telegram" in p or p == "tg":
             return await self._resolve_telegram_avatar(event, user_id)
 
-        # 未知平台兜底：仍按 QQ 头像直链尝试
-        return f"http://q.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        # aiocqhttp / onebot 及未知平台：仅纯数字 user_id 才可能是有效 QQ 号，
+        # 否则 qlogo 会返回灰色默认企鹅头像，不再是错误而是"假成功"
+        if user_id.isdigit():
+            return f"http://q.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        return None
 
     @staticmethod
     def _resolve_qqofficial_avatar(event) -> Optional[str]:

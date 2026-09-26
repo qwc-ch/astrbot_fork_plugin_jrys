@@ -87,13 +87,50 @@ class JrysPlugin(Star):
             async for result in self.jrys(event):
                 yield result
 
+    @staticmethod
+    def _get_display_name(event: AstrMessageEvent, user_id: str) -> str:
+        """
+        跨平台获取用户显示名：
+        1. 优先 event.get_sender_name()
+        2. QQ 官方机器人频道消息尝试 author.username
+        3. Telegram 尝试 from_user 的 first_name/username
+        4. 都没有则用 "用户XXXX"(user_id 后4位)
+        """
+        name = ""
+        try:
+            name = event.get_sender_name() or ""
+        except Exception:
+            pass
+
+        if not name or not str(name).strip():
+            try:
+                raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+                # QQ 官方机器人: author.username
+                author = getattr(raw, "author", None)
+                if author is not None:
+                    name = getattr(author, "username", None) or getattr(author, "name", None) or ""
+                # Telegram: from_user / from_
+                if not name:
+                    from_user = getattr(raw, "from_user", None) or getattr(raw, "from_", None)
+                    if from_user is not None:
+                        first = getattr(from_user, "first_name", "") or ""
+                        last = getattr(from_user, "last_name", "") or ""
+                        name = (first + " " + last).strip() or getattr(from_user, "username", "") or ""
+            except Exception:
+                pass
+
+        name = str(name).strip() if name else ""
+        if not name:
+            name = f"用户{str(user_id)[-4:]}"
+        return name
+
     async def jrys(self, event: AstrMessageEvent):
         """
         输入/jrys,"/今日运势", "/运势"指令后，生成今日运势海报
         """
 
         user_id = event.get_sender_id()
-        user_name = event.get_sender_name()
+        user_name = self._get_display_name(event, user_id)
 
         self.jrys_data = await self.resources._load_jrys_data()
 

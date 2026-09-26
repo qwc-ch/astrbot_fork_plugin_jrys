@@ -616,54 +616,75 @@ class FortunePainter:
         ]
         return random.choices(light_colors, k=4)  # 随机选4个颜色进行渐变
 
-    def generate_default_avatar_sync(self, name: str = "?") -> str:
+    def generate_default_avatar_sync(self, name: str = "?") -> Optional[str]:
         """
         生成默认头像（彩色圆形 + 用户名首字符）。
         用于 QQ 官方机器人等无法获取用户头像的平台兜底。
         生成结果会缓存在 avatar_dir 中，同名用户复用。
+        任何一步失败都会降级重试（自定义字体 -> 默认字体 -> 无文字），
+        尽量保证始终能产出一张头像。
         """
-        display = (name or "?").strip() or "?"
+        import traceback
+
+        display = (str(name).strip() if name else "") or "?"
         key = sha256(display.encode("utf-8")).hexdigest()
         path = os.path.join(self.avatar_dir, f"default_{key[:16]}.png")
 
-        def _build() -> None:
-            size = 256
-            # 用名字哈希生成稳定配色
-            hue = int(key[:8], 16) % 360
-            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.55, 0.55)
-            color = (int(r * 255), int(g * 255), int(b * 255), 255)
+        if os.path.exists(path):
+            return path
 
+        size = 256
+        # 用名字哈希生成稳定配色
+        hue = int(key[:8], 16) % 360
+        r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.55, 0.55)
+        color = (int(r * 255), int(g * 255), int(b * 255), 255)
+
+        def _build(font) -> None:
             img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.ellipse((0, 0, size - 1, size - 1), fill=color)
-
-            ch = display[0].upper()
-            try:
-                font = ImageFont.truetype(self.font_path, 128)
-            except Exception:
-                font = ImageFont.load_default()
-
-            bbox = draw.textbbox((0, 0), ch, font=font)
-            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            draw.text(
-                ((size - w) / 2 - bbox[0], (size - h) / 2 - bbox[1]),
-                ch,
-                font=font,
-                fill=(255, 255, 255, 255),
-            )
+            if font is not None:
+                ch = display[0].upper()
+                bbox = draw.textbbox((0, 0), ch, font=font)
+                w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                draw.text(
+                    ((size - w) / 2 - bbox[0], (size - h) / 2 - bbox[1]),
+                    ch,
+                    font=font,
+                    fill=(255, 255, 255, 255),
+                )
             img.save(path, "PNG")
 
+        attempts = []
         try:
-            if not os.path.exists(path):
-                _build()
-            return path
-        except Exception as e:
-            logger.error(f"生成默认头像失败: {e}")
-            return None
+            attempts.append(ImageFont.truetype(self.font_path, 128))
+        except Exception:
+            pass
+        try:
+            attempts.append(ImageFont.load_default())
+        except Exception:
+            pass
+        attempts.append(None)  # 最后兜底：纯彩色圆形不带文字
+
+        last_err = None
+        for font in attempts:
+            try:
+                _build(font)
+                return path
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    f"生成默认头像失败(font={type(font).__name__})，尝试降级: {e}"
+                )
+
+        logger.error(
+            "生成默认头像最终失败:\n" + traceback.format_exc()
+        )
+        logger.error(f"最后一次错误: {last_err}")
+        return None
 
     def draw_avatar_img(self, avatar_path: str, img: Image.Image) -> Image.Image:
         """
-        在图片上绘制用户头像
         1. 获取用户头像
         2. 将头像裁剪为圆形
         3. 将头像绘制到图片上
