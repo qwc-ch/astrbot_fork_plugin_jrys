@@ -58,98 +58,265 @@ class ResourceManager:
 
     async def get_background_image(self) -> Optional[Tuple[str, bool]]:
         """
-        随机获取背景图片
-        1. 在当前目录下的 backgroundFolder 文件夹中查找所有的 txt 文件
-        2. 随机选择一个 txt 文件
-        3. 从选中的 txt 文件中随机选择一行
-        4. 将选中的行作为图片的 URL
-        5.返回图片路径，以及是否需要清理
+        从 backgrounds.json 图片源随机获取背景图片。
+        支持的图源格式（与 astrbot_plugin_fortnue 相同）：
+        - "名字": ["url1", "url2", ...]            直链列表，随机挑一个
+        - "名字": "url"                             单条直链
+        - "名字": {"type": "api", "url": ..., "token": "data.0.urls.regular", ...}
+                                                    请求 API，从 JSON 里按 token 提取图片地址
+        - "名字": {"type": "object", "sources": [...]}  备选源列表
+        返回 (图片路径, 是否需要清理)。
         """
-
         try:
             self._ensure_storage_dirs()
 
-            # 查找所有的 txt 文件
-            background_files = await asyncio.to_thread(
-                lambda: [
-                    f for f in os.listdir(self.background_dir) if f.endswith(".txt")
-                ]
-            )
-
-            if not background_files:
-                logger.warning("没有找到背景图片文件")
+            sources = await self._load_backgrounds_data()
+            if not sources:
+                logger.warning("backgrounds.json 中没有可用的图片源")
                 return None
-            # 随机选择一个 txt 文件
-            background_file = random.choice(background_files)
-            background_file_path = os.path.join(self.background_dir, background_file)
 
-            # 从选中的 txt 文件中随机选择一行
-            async with aiofiles.open(background_file_path, "r", encoding="utf-8") as f:
-                # 读取文件内容
-                background_urls = [line.strip() async for line in f if line.strip()]
+            ignored = set(self.plugin_config.get("ignored_sources", []) or [])
+            weights = self._get_source_weights()
 
-                if not background_urls:
-                    logger.warning(f"文件 {background_file} 中没有找到有效的 URL")
-                    return None
-
-                # 尝试多个 URL，避免个别链接失效导致整体失败
-                random.shuffle(background_urls)
-                max_attempts = min(5, len(background_urls))
-
-                pre_cache_enabled = bool(
-                    self.plugin_config.get("pre_cache_background_images", False)
-                )
-                cleanup_downloads = bool(
-                    self.plugin_config.get("cleanup_background_downloads", True)
-                )
-
-                for image_url in background_urls[:max_attempts]:
-                    if not (
-                        image_url.startswith("http://")
-                        or image_url.startswith("https://")
-                    ):
-                        continue
-
-                    cache_path = self._background_cache_path_for_url(image_url)
-
-                    # 已缓存则直接返回（持久化缓存不做清理）
-                    if cache_path.exists():
-                        return str(cache_path), False
-
-                    # 未启用预缓存时：默认按需下载后清理；关闭开关则仍然写入持久化缓存目录
-                    image_path = cache_path
-                    should_cleanup = False
-                    if (not pre_cache_enabled) and cleanup_downloads:
-                        image_path = self._background_tmp_path_for_url(image_url)
-                        should_cleanup = True
-
-                    ok = await self._download_to_path(
-                        image_url, image_path, label="背景图"
-                    )
-                    if ok:
-                        logger.info(f"下载图片成功: {image_url}")
-                        return str(image_path), should_cleanup
-
-                logger.warning(f"背景图下载失败: 已尝试 {max_attempts} 个 URL")
+            candidates = [k for k in sources.keys() if k not in ignored]
+            if not candidates:
+                logger.warning("backgrounds.json 中的图片源全部被忽略")
                 return None
+
+            # 最多尝试 3 个不同图源，避免个别图源失效导致整体失败
+            tried: set = set()
+            for _ in range(min(3, len(candidates))):
+                remaining = [c for c in candidates if c not in tried]
+                source_key = self._weighted_choice(remaining, weights)
+                tried.add(source_key)
+
+                result = await self._fetch_from_source(source_key, sources[source_key])
+                if result:
+                    return result
+
+            logger.warning("已从多个图片源尝试，均获取背景图失败")
+            return None
 
         except Exception as e:
             logger.error(f"获取背景图片时出错: {e}")
             return None
 
-    async def get_avatar_img(self, user_id: str) -> Optional[str]:
+    async def _load_backgrounds_data(self) -> dict:
+        """读取插件目录下的 backgrounds.json（带 mtime 缓存，改了文件自动重载）。"""
+        path = os.path.join(self.data_dir, "backgrounds.json")
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            logger.warning(f"未找到图片源文件: {path}")
+            return {}
+
+        cached = getattr(self, "_backgrounds_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
+
+        try:
+            async with aiofiles.open(path, "r", encoding="utf-8") as f:
+                data = json.loads(await f.read())
+            if not isinstance(data, dict):
+                logger.error("backgrounds.json 必须是 JSON 对象")
+                return {}
+            self._backgrounds_cache = (mtime, data)
+            logger.info(f"读取图片源文件: {path}（{len(data)} 个图源）")
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"backgrounds.json 不是有效的 JSON: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"读取 backgrounds.json 失败: {e}")
+            return {}
+
+    async def _fetch_from_source(self, name: str, spec) -> Optional[Tuple[str, bool]]:
+        """从单个图源获取背景图。"""
+        urls: List[str] = []
+
+        if isinstance(spec, str) and spec:
+            urls = [spec]
+        elif isinstance(spec, list) and spec:
+            urls = [u for u in spec if isinstance(u, str)]
+            random.shuffle(urls)
+            urls = urls[:5]  # 列表型图源最多试 5 条
+        elif isinstance(spec, dict):
+            t = spec.get("type")
+            if t == "api":
+                url = await self._resolve_api_image_url(name, spec)
+                urls = [url] if url else []
+            elif t == "object":
+                items = spec.get("sources") or []
+                if items:
+                    item = random.choice(items)
+                    if isinstance(item, str):
+                        urls = [item]
+                    elif isinstance(item, dict) and item.get("url"):
+                        urls = [item["url"]]
+            elif t == "array":
+                items = [u for u in (spec.get("items") or spec.get("urls") or []) if isinstance(u, str)]
+                random.shuffle(items)
+                urls = items[:5]
+            else:
+                # 没写 type 的 dict，按 api 处理
+                if spec.get("url"):
+                    url = await self._resolve_api_image_url(name, spec)
+                    urls = [url] if url else []
+
+        for url in urls:
+            if not url.startswith(("http://", "https://")):
+                continue
+            result = await self._fetch_bg_url(url)
+            if result:
+                return result
+
+        logger.warning(f"图源 {name} 获取背景图失败")
+        return None
+
+    async def _fetch_bg_url(self, image_url: str) -> Optional[Tuple[str, bool]]:
+        """下载单张背景图（带持久化缓存和临时清理逻辑）。"""
+        cache_path = self._background_cache_path_for_url(image_url)
+
+        # 已缓存则直接返回（持久化缓存不做清理）
+        if cache_path.exists():
+            return str(cache_path), False
+
+        pre_cache_enabled = bool(
+            self.plugin_config.get("pre_cache_background_images", False)
+        )
+        cleanup_downloads = bool(
+            self.plugin_config.get("cleanup_background_downloads", True)
+        )
+
+        # 未启用预缓存时：默认按需下载后清理；关闭开关则仍然写入持久化缓存目录
+        image_path = cache_path
+        should_cleanup = False
+        if (not pre_cache_enabled) and cleanup_downloads:
+            image_path = self._background_tmp_path_for_url(image_url)
+            should_cleanup = True
+
+        ok = await self._download_to_path(image_url, image_path, label="背景图")
+        if ok:
+            logger.info(f"下载图片成功: {image_url}")
+            return str(image_path), should_cleanup
+        return None
+
+    async def _resolve_api_image_url(self, name: str, spec: dict) -> Optional[str]:
+        """解析 api 类型图源：请求接口，从 JSON 中按 token 提取图片地址。"""
+        url = spec.get("url")
+        if not url:
+            return None
+
+        # expected == "image" 表示接口直接返回图片，URL 本身就是最终图片地址
+        expected = str(spec.get("expected", "url")).lower()
+        if expected == "image":
+            return url
+
+        method = str(spec.get("method", "get")).upper()
+        headers = spec.get("headers") if isinstance(spec.get("headers"), dict) else {}
+        req_headers = {**self._http_headers, **headers}
+
+        try:
+            async with self._session.request(
+                method, url, headers=req_headers
+            ) as resp:
+                if resp.status < 200 or resp.status >= 300:
+                    logger.error(
+                        f"图源 {name} API 请求失败: HTTP {resp.status} | {url}"
+                    )
+                    return None
+                js = await resp.json(content_type=None)
+
+            token = spec.get("token") or ""
+            img_url = self._extract_token_value(js, token)
+            if isinstance(img_url, list):
+                img_url = random.choice(img_url) if img_url else None
+            if not isinstance(img_url, str) or not img_url:
+                logger.error(
+                    f"图源 {name} 的 token '{token}' 未解析到有效的图片 URL"
+                )
+                return None
+            return img_url
+        except Exception as e:
+            logger.error(f"解析图源 {name} 的 API 失败: {e}")
+            return None
+
+    @staticmethod
+    def _extract_token_value(obj, token: str):
+        """按 "data.0.urls.regular" 这种路径从 JSON 对象里取值。"""
+        if not isinstance(token, str) or not token:
+            return obj
+        cur = obj
+        for part in [p for p in token.split(".") if p]:
+            if isinstance(cur, list):
+                if not cur:
+                    return None
+                if part.isdigit() and int(part) < len(cur):
+                    cur = cur[int(part)]
+                    continue
+                cur = random.choice(cur)
+            elif isinstance(cur, dict):
+                if part in cur:
+                    cur = cur[part]
+                else:
+                    return None
+            else:
+                return None
+        return cur
+
+    def _get_source_weights(self) -> dict:
+        """从配置获取图源权重映射，格式: ["ba:2.0", "miku:1.0"]"""
+        weights = {}
+        for item in self.plugin_config.get("source_weights", []) or []:
+            if isinstance(item, str) and ":" in item:
+                name, _, w = item.partition(":")
+                try:
+                    weight = float(w.strip())
+                    if weight > 0:
+                        weights[name.strip()] = weight
+                except ValueError:
+                    pass
+        return weights
+
+    @staticmethod
+    def _weighted_choice(choices: list, weights: dict) -> str:
+        """加权随机选择"""
+        if not choices:
+            return ""
+        choice_weights = [weights.get(c, 1.0) for c in choices]
+        total = sum(choice_weights)
+        if total <= 0:
+            return random.choice(choices)
+        r = random.uniform(0, total)
+        cumsum = 0
+        for choice, weight in zip(choices, choice_weights):
+            cumsum += weight
+            if r <= cumsum:
+                return choice
+        return choices[-1]
+    async def get_avatar_img(self, user_id: str, event=None) -> Optional[str]:
         """
-        获取用户头像
-          1. 获取用户头像2. 获取用户头像的 URL3. 下载头像4. 返回头像的路径
+        获取用户头像（多平台适配）
+          1. 根据消息来源平台解析头像 URL
+          2. 下载头像 3. 返回头像的路径
         Args:
             user_id (str): 用户 ID
+            event: AstrMessageEvent，用于判断平台并获取平台相关数据
 
         Returns:
-            str: 头像的路径
+            str: 头像的路径，获取不到时返回 None（由调用方使用默认头像兜底）
         """
         try:
             self._ensure_storage_dirs()
-            avatar_path = os.path.join(self.avatar_dir, f"{user_id}.jpg")
+            platform = ""
+            if event is not None:
+                try:
+                    platform = event.get_platform_name() or ""
+                except Exception:
+                    platform = ""
+            # 不同平台的 user_id 可能撞号，缓存文件名带平台前缀
+            cache_key = f"{platform}_{user_id}" if platform else str(user_id)
+            avatar_path = os.path.join(self.avatar_dir, f"{cache_key}.jpg")
             # 检查头像是否存在
             if await aiofiles.os.path.exists(avatar_path):
 
@@ -167,7 +334,12 @@ class ResourceManager:
                 ):  # 默认如果头像文件小于一天，则不下载
                     return avatar_path
 
-            url = f"http://q.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+            url = await self._resolve_avatar_url(event, platform, str(user_id))
+            if not url:
+                logger.info(
+                    f"平台 {platform or '未知'} 无法获取用户 {user_id} 的头像，将使用默认头像"
+                )
+                return None
 
             ok = await self._download_to_path(url, Path(avatar_path), label="头像")
             if ok:
@@ -177,6 +349,77 @@ class ResourceManager:
         except Exception as e:
             logger.error(f"获取用户头像失败: {e}")
             return None
+
+    async def _resolve_avatar_url(
+        self, event, platform: str, user_id: str
+    ) -> Optional[str]:
+        """
+        按平台解析用户头像 URL：
+        - aiocqhttp(OneBot v11): QQ 头像直链
+        - qqofficial(QQ 官方机器人): 尝试从频道消息的 author.avatar 获取
+          （群聊/C2C 官方接口不提供头像，返回 None 走默认头像）
+        - telegram: 通过 Bot API getUserProfilePhotos 获取
+        - 其他平台: 尝试按 QQ 号直链获取（兼容旧行为）
+        """
+        if platform in ("aiocqhttp", "onebot", "onebot11") or not platform:
+            return f"http://q.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+
+        if platform == "qqofficial":
+            return self._resolve_qqofficial_avatar(event)
+
+        if platform == "telegram":
+            return await self._resolve_telegram_avatar(event, user_id)
+
+        # 未知平台兜底：仍按 QQ 头像直链尝试
+        return f"http://q.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+
+    @staticmethod
+    def _resolve_qqofficial_avatar(event) -> Optional[str]:
+        """QQ 官方机器人：仅频道消息作者可能带有 avatar 字段。"""
+        try:
+            raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+            author = getattr(raw, "author", None)
+            avatar = getattr(author, "avatar", None) if author else None
+            if avatar and str(avatar).startswith(("http://", "https://")):
+                return str(avatar)
+        except Exception as e:
+            logger.warning(f"解析 QQ 官方机器人头像失败: {e}")
+        return None
+
+    async def _resolve_telegram_avatar(self, event, user_id: str) -> Optional[str]:
+        """Telegram：通过 Bot API 获取用户头像文件下载链接。"""
+        try:
+            bot = getattr(event, "bot", None)
+            # AstrBot Telegram 平台中 event.bot 可能是 Application，需取其 .bot
+            app_bot = getattr(bot, "bot", None)
+            if app_bot is not None:
+                bot = app_bot
+            if bot is None or not hasattr(bot, "get_user_profile_photos"):
+                return None
+
+            photos = await bot.get_user_profile_photos(user_id=int(user_id), limit=1)
+            if (
+                not photos
+                or getattr(photos, "total_count", 0) == 0
+                or not getattr(photos, "photos", None)
+            ):
+                return None
+
+            # 取最大尺寸的一张
+            sizes = list(photos.photos[0])
+            biggest = max(sizes, key=lambda p: getattr(p, "file_size", 0) or 0)
+            tg_file = await bot.get_file(biggest.file_id)
+            file_path = getattr(tg_file, "file_path", None)
+            token = getattr(bot, "token", None)
+            if token and file_path:
+                return f"https://api.telegram.org/file/bot{token}/{file_path}"
+            # python-telegram-bot 的 File 对象本身也提供完整 URL
+            full_url = getattr(tg_file, "file_url", None)
+            if full_url:
+                return str(full_url)
+        except Exception as e:
+            logger.warning(f"解析 Telegram 头像失败: {e}")
+        return None
 
     async def initialize(self):
         """插件加载/重载后执行（适合做缓存预热等异步任务）。"""
@@ -494,25 +737,37 @@ class ResourceManager:
         return False
 
     async def _collect_all_background_urls(self) -> List[str]:
-        background_files = await asyncio.to_thread(
-            lambda: [f for f in os.listdir(self.background_dir) if f.endswith(".txt")]
-        )
+        """收集 backgrounds.json 中所有静态直链（api 类型图源无法预知结果，跳过）。"""
+        sources = await self._load_backgrounds_data()
 
         urls: set[str] = set()
-        for background_file in background_files:
-            background_file_path = os.path.join(self.background_dir, background_file)
-            try:
-                async with aiofiles.open(
-                    background_file_path, "r", encoding="utf-8"
-                ) as f:
-                    async for line in f:
-                        url = line.strip()
-                        if not url:
-                            continue
-                        if url.startswith("http://") or url.startswith("https://"):
-                            urls.add(url)
-            except Exception as e:
-                logger.warning(f"读取背景图列表失败: {background_file_path} | {e}")
+
+        def _add(u):
+            if isinstance(u, str) and u.startswith(("http://", "https://")):
+                urls.add(u)
+
+        for spec in sources.values():
+            if isinstance(spec, str):
+                _add(spec)
+            elif isinstance(spec, list):
+                for u in spec:
+                    _add(u)
+            elif isinstance(spec, dict):
+                t = spec.get("type")
+                if t == "object":
+                    for item in spec.get("sources") or []:
+                        if isinstance(item, str):
+                            _add(item)
+                        elif isinstance(item, dict):
+                            _add(item.get("url"))
+                elif t == "array":
+                    for u in spec.get("items") or spec.get("urls") or []:
+                        _add(u)
+                elif spec.get("type") is None and spec.get("expected") == "image":
+                    _add(spec.get("url"))
+                elif t == "api" and str(spec.get("expected", "")).lower() == "image":
+                    # api 直接返回图片时 URL 本身就是图片地址
+                    _add(spec.get("url"))
 
         return sorted(urls)
 

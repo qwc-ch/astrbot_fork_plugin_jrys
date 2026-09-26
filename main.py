@@ -104,7 +104,7 @@ class JrysPlugin(Star):
 
         try:
             results = await asyncio.gather(
-                self.resources.get_avatar_img(user_id),
+                self.resources.get_avatar_img(user_id, event),
                 self.resources.get_background_image(),
                 return_exceptions=True,  # 捕获异常
             )
@@ -136,6 +136,24 @@ class JrysPlugin(Star):
                     except Exception:
                         pass
                 return
+
+            # 平台无法提供头像（如 QQ 官方机器人群聊/C2C）时，使用默认头像兜底
+            if not avatar_path:
+                avatar_path = await asyncio.to_thread(
+                    self.painter.generate_default_avatar_sync, user_name
+                )
+                if not avatar_path:
+                    yield event.plain_result("生成默认头像失败，请稍后再试～")
+                    if (
+                        background_should_cleanup
+                        and background_path
+                        and os.path.exists(background_path)
+                    ):
+                        try:
+                            await aiofiles.os.remove(background_path)
+                        except Exception:
+                            pass
+                    return
 
         except Exception as e:
             logger.error(f"获取头像或背景图片时出错: {e}")

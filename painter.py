@@ -2,6 +2,8 @@ from PIL import Image, ImageDraw, ImageFont
 from typing import Optional, List, Tuple
 from astrbot.api import logger
 from datetime import datetime
+from hashlib import sha256
+import colorsys
 import tempfile
 import random
 import os
@@ -613,6 +615,51 @@ class FortunePainter:
             (230, 230, 250),  # 浅薰衣草色
         ]
         return random.choices(light_colors, k=4)  # 随机选4个颜色进行渐变
+
+    def generate_default_avatar_sync(self, name: str = "?") -> str:
+        """
+        生成默认头像（彩色圆形 + 用户名首字符）。
+        用于 QQ 官方机器人等无法获取用户头像的平台兜底。
+        生成结果会缓存在 avatar_dir 中，同名用户复用。
+        """
+        display = (name or "?").strip() or "?"
+        key = sha256(display.encode("utf-8")).hexdigest()
+        path = os.path.join(self.avatar_dir, f"default_{key[:16]}.png")
+
+        def _build() -> None:
+            size = 256
+            # 用名字哈希生成稳定配色
+            hue = int(key[:8], 16) % 360
+            r, g, b = colorsys.hls_to_rgb(hue / 360.0, 0.55, 0.55)
+            color = (int(r * 255), int(g * 255), int(b * 255), 255)
+
+            img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            draw.ellipse((0, 0, size - 1, size - 1), fill=color)
+
+            ch = display[0].upper()
+            try:
+                font = ImageFont.truetype(self.font_path, 128)
+            except Exception:
+                font = ImageFont.load_default()
+
+            bbox = draw.textbbox((0, 0), ch, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text(
+                ((size - w) / 2 - bbox[0], (size - h) / 2 - bbox[1]),
+                ch,
+                font=font,
+                fill=(255, 255, 255, 255),
+            )
+            img.save(path, "PNG")
+
+        try:
+            if not os.path.exists(path):
+                _build()
+            return path
+        except Exception as e:
+            logger.error(f"生成默认头像失败: {e}")
+            return None
 
     def draw_avatar_img(self, avatar_path: str, img: Image.Image) -> Image.Image:
         """

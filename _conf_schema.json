@@ -88,7 +88,7 @@
     "pre_cache_background_images":{
         "description": "加载/重载时预缓存背景图",
         "type": "bool",
-        "hint": "启用后，插件在加载/重载时会后台预下载 backgroundFolder/*.txt 中的所有图片 URL 到本地缓存目录 （需要 AstrBot >= 4.9.2）。",
+        "hint": "启用后，插件在加载/重载时会后台预下载 backgrounds.json 中的所有静态图片 URL 到本地缓存目录（api 类型图源跳过）（需要 AstrBot >= 4.9.2）。",
         "default": false
     },
     "pre_cache_concurrency":{
@@ -96,6 +96,18 @@
         "type": "int",
         "hint": "预缓存背景图时的并发下载数量，建议 1-10，默认 3。",
         "default": 3
+    },
+    "ignored_sources":{
+        "description": "忽略的图片源",
+        "type": "list",
+        "hint": "填写 backgrounds.json 中不希望被随机到的图源名称，例如 [\"lolicon_api\"]。默认为空。",
+        "default": []
+    },
+    "source_weights":{
+        "description": "图源权重",
+        "type": "list",
+        "hint": "设置各图源被选中的权重，格式为 图源名:权重，例如 [\"ba:2.0\", \"miku:1.0\"]，未列出的图源权重为 1。默认为空。",
+        "default": []
     },
     "cleanup_background_downloads":{
         "description": "清理非预缓存模式下的背景图下载",
