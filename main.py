@@ -223,12 +223,23 @@ class JrysPlugin(Star):
                 return
 
             # 发送时先 @ 用户，再跟上生成的运势图
-            chain = [
-                At(qq=event.get_sender_id(), name=user_name),
-                Plain(f" {user_name} 的今日运势："),
-                Image.fromFileSystem(temp_file_path),
-            ]
-            yield event.chain_result(chain)
+            platform = (event.get_platform_name() or "").lower().replace("-", "_")
+            if "qqofficial" in platform or "qq_official" in platform:
+                # QQ 官方机器人对图文混合消息支持差（媒体需单独上传），分两条发送
+                yield event.chain_result(
+                    [
+                        At(qq=event.get_sender_id(), name=user_name),
+                        Plain(f" {user_name} 的今日运势："),
+                    ]
+                )
+                yield event.image_result(temp_file_path)
+            else:
+                chain = [
+                    At(qq=event.get_sender_id(), name=user_name),
+                    Plain(f" {user_name} 的今日运势："),
+                    Image.fromFileSystem(temp_file_path),
+                ]
+                yield event.chain_result(chain)
             logger.info(f"成功为用户 {user_name}({user_id}) 生成今日运势图片")
 
             # 保存最后一次使用的背景图信息到 jrys_data
