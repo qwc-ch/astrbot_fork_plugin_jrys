@@ -225,9 +225,10 @@ class JrysPlugin(Star):
             # 发送时先 @ 用户，再跟上生成的运势图
             platform = (event.get_platform_name() or "").lower().replace("-", "_")
             if "qqofficial" in platform or "qq_official" in platform:
-                # QQ 官方机器人对图文混合消息支持差（媒体需单独上传），分两条发送。
-                # 适配器会忽略 At 组件，群聊需在文本里内嵌 <qqbot-at-user> 标签才能真 @；
-                # C2C 私聊官方不支持 @，纯文本即可。
+                # QQ 官方机器人：@ + 文字 + 图片同一条消息发送（适配器 payload
+                # 本身支持 content + media 共存）。
+                # 注意适配器会忽略 At 组件，群聊需在文本里内嵌 <qqbot-at-user>
+                # 标签才能真 @；C2C 私聊官方不支持 @，纯文本即可。
                 raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
                 raw_cls = type(raw).__name__ if raw is not None else ""
                 if raw_cls == "GroupMessage":
@@ -236,8 +237,12 @@ class JrysPlugin(Star):
                     )
                 else:
                     mention_text = f"{user_name} 的今日运势："
-                yield event.plain_result(mention_text)
-                yield event.image_result(temp_file_path)
+                yield event.chain_result(
+                    [
+                        Plain(mention_text),
+                        Image.fromFileSystem(temp_file_path),
+                    ]
+                )
             else:
                 chain = [
                     At(qq=event.get_sender_id(), name=user_name),
